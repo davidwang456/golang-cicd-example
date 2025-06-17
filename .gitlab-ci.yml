@@ -1,0 +1,98 @@
+stages:
+  - build
+  - package
+  - test
+  - publish
+
+variables:
+  GOPRIVATE: gitlab.example.com
+  GOPROXY: https://goproxy.cn,direct
+  GOSUMDB: off
+  # Nexus 仓库配置
+  NEXUS_URL: https://nexus.example.com
+  NEXUS_REPOSITORY: go-releases
+  NEXUS_USERNAME: ${NEXUS_USERNAME}
+  NEXUS_PASSWORD: ${NEXUS_PASSWORD}
+  # 模块配置
+  MODULE_PATH: github.com/yourusername/go-example
+
+build:
+  stage: build
+  image: golang:1.21
+  script:
+    # 下载依赖
+    - go mod download
+    # 编译项目
+    - go build -o bin/go-example cmd/main.go
+  artifacts:
+    paths:
+      - bin/
+      - module/
+    expire_in: 1 week
+
+package:
+  stage: package
+  image: alpine:latest
+  script:
+    # 创建发布目录
+    - mkdir -p release
+    # 打包可执行文件
+    - tar -czf release/go-example-${CI_COMMIT_TAG}.tar.gz -C bin go-example
+        # 准备 Go 模块文件
+    - VERSION=$(echo $CI_COMMIT_TAG | sed 's/^v//')
+    - mkdir -p module/v$VERSION
+    - cp go.mod module/v$VERSION/
+    - echo '{"Version": "v'$VERSION'", "Time": "'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'"}' > module/v$VERSION/go-example.info
+    - zip -r module/v$VERSION/go-example.zip . -x "*.git*" "module/*"
+  artifacts:
+    paths:
+      - release/
+      - module/
+    expire_in: 1 week
+  dependencies:
+    - build
+
+test:
+  stage: test
+  image: golang:1.21
+  script:
+    # 运行测试
+    - go test -v ./...
+  dependencies:
+    - build
+
+publish:
+  stage: publish
+  image: alpine:latest
+  script:
+    # 获取版本号
+    - VERSION=$(echo $CI_COMMIT_TAG | sed 's/^v//')
+    # 上传可执行文件
+    - |
+      curl -v -u ${NEXUS_USERNAME}:${NEXUS_PASSWORD} \
+        -H "Content-Type: application/gzip" \
+        --upload-file release/go-example-${CI_COMMIT_TAG}.tar.gz \
+        "${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/go-example/${CI_COMMIT_TAG}/go-example-${CI_COMMIT_TAG}.tar.gz"
+    # 上传 Go 模块文件
+    - |
+      # 上传 .mod 文件
+      curl -v -u ${NEXUS_USERNAME}:${NEXUS_PASSWORD} \
+        -H "Content-Type: text/plain" \
+        --upload-file module/v$VERSION/go.mod \
+        "${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${MODULE_PATH}/v$VERSION/go.mod"
+      
+      # 上传 .info 文件
+      curl -v -u ${NEXUS_USERNAME}:${NEXUS_PASSWORD} \
+        -H "Content-Type: application/json" \
+        --upload-file module/v$VERSION/go-example.info \
+        "${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${MODULE_PATH}/v$VERSION/go-example.info"
+      
+      # 上传 .zip 文件
+      curl -v -u ${NEXUS_USERNAME}:${NEXUS_PASSWORD} \
+        -H "Content-Type: application/zip" \
+        --upload-file module/v$VERSION/go-example.zip \
+        "${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${MODULE_PATH}/v$VERSION/go-example.zip"
+  dependencies:
+    - package
+  only:
+    - tags 
